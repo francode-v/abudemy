@@ -1,0 +1,33 @@
+# Render Blueprint — solo el backend (la web va en Cloudflare Pages y la base en Neon).
+# Render > New > Blueprint > selecciona este repositorio.
+services:
+  - type: web
+    name: abudemy-api
+    runtime: docker
+    plan: free                      # cambia a "starter" para que no se duerma
+    region: virginia                # usa la misma región AWS que tu proyecto Neon
+    rootDir: backend
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /healthz       # no toca la base: no despierta Neon
+    autoDeploy: true
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: DATABASE_URL           # cadena de conexión de Neon (con ?sslmode=require)
+        sync: false
+      - key: JWT_SECRET             # Render genera un valor aleatorio de 256 bits
+        generateValue: true
+      - key: CORS_ALLOWED_ORIGINS   # ej: https://abudemy.pages.dev,https://*.abudemy.pages.dev
+        sync: false
+      - key: BCRYPT_COST            # 11 es más liviano para la instancia gratuita
+        value: "11"
+      - key: DB_MAX_CONNS
+        value: "5"
+      - key: SEED_DEMO_DATA         # true solo para una demo: crea cuentas con claves públicas
+        value: "false"
+      - key: SEED_ADMIN_EMAIL
+        sync: false
+      - key: SEED_ADMIN_PASSWORD
+        sync: false

@@ -1,0 +1,3 @@
+# Cloudflare Pages: fallback SPA (BrowserRouter). Las rutas como /actividades
+# o /mapa deben servir index.html y dejar que React Router las resuelva.
+/*    /index.html   200

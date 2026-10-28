@@ -1,0 +1,2468 @@
+openapi: 3.0.3
+info:
+  title: Abudemy API
+  version: 1.0.0
+  description: |
+    Shared REST API for the Abudemy mobile application (older adults) and the
+    institutional web platform. Both clients consume the same API and the same
+    PostgreSQL datastore.
+
+    ## Authentication
+    Every endpoint except `POST /api/v1/auth/*`, `GET /healthz` and `GET /readyz`
+    requires a Bearer access token obtained from `POST /api/v1/auth/login`.
+    Refresh tokens are rotated on every use; access tokens are short lived and
+    are invalidated when their session is revoked.
+
+    ## Authorization
+    Roles: `mobile_user`, `institutional_client`, `org_collaborator`, `admin`.
+    Resource access is additionally scoped by organization membership. The
+    backend always validates permissions; clients must not assume otherwise.
+
+    ## Errors
+    Errors share a single envelope (`ErrorResponse`). `403` is returned when the
+    caller is authenticated but lacks permission (including cross-user or
+    cross-organization access).
+  contact:
+    name: Abudemy backend
+servers:
+  - url: http://localhost:8080
+    description: Local development
+tags:
+  - name: Auth
+  - name: Users
+  - name: Services
+  - name: Activities
+  - name: Opportunities
+  - name: Assistance
+  - name: Organizations
+  - name: Analytics
+  - name: Notifications
+  - name: Assistant
+  - name: Geo
+  - name: Payments
+  - name: Health
+
+security:
+  - bearerAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      security: []
+      responses:
+        "200":
+          description: Service is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+  /readyz:
+    get:
+      tags: [Health]
+      summary: Readiness probe (checks the database)
+      security: []
+      responses:
+        "200":
+          description: Service is ready
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ------------------------------------------------------------------ Auth
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password, full_name]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8, maxLength: 72, description: At least one letter and one digit; 72 is bcrypt's byte limit }
+                full_name: { type: string }
+                phone: { type: string }
+                birth_date: { type: string, format: date }
+                comuna: { type: string, example: Concepción }
+                health_system:
+                  type: string
+                  enum: [fonasa, isapre, capredena, dipreca, private, other]
+                  description: Health coverage declared by the person.
+                sex:
+                  type: string
+                  enum: [female, male, other, prefer_not_to_say]
+                living_situation:
+                  type: string
+                  enum:
+                    - alone
+                    - with_partner
+                    - with_children
+                    - with_partner_and_children
+                    - with_family
+                    - with_caregiver
+                    - other
+                  description: Who the person lives with.
+                role:
+                  type: string
+                  enum: [mobile_user, institutional_client]
+                  default: mobile_user
+                  description: |
+                    Institutional clients are created with `institutional_approved=false`
+                    and must be approved by an administrator before using the portal.
+      responses:
+        "201":
+          description: Created account
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in and obtain a token pair
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+      responses:
+        "200":
+          description: Token pair
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate a refresh token for a new token pair
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: New token pair
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenPair" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/auth/logout:
+    post:
+      tags: [Auth]
+      summary: Revoke the current session
+      responses:
+        "204": { description: Session revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/auth/logout-all:
+    post:
+      tags: [Auth]
+      summary: Revoke every session of the caller
+      responses:
+        "204": { description: All sessions revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/auth/sessions:
+    get:
+      tags: [Auth]
+      summary: List the caller's sessions
+      responses:
+        "200":
+          description: Sessions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Session" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/auth/sessions/{id}:
+    delete:
+      tags: [Auth]
+      summary: Revoke one of the caller's sessions
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "204": { description: Session revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/auth/password/forgot:
+    post:
+      tags: [Auth]
+      summary: Request a password reset
+      description: |
+        Always returns 202 regardless of whether the email exists. The reset
+        token is dispatched through the configured notification provider; when
+        no provider is configured the token is stored but not delivered.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "202": { description: Request accepted }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/auth/password/reset:
+    post:
+      tags: [Auth]
+      summary: Reset a password with a valid token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, new_password]
+              properties:
+                token: { type: string }
+                new_password: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        "204": { description: Password updated }
+        "400": { $ref: "#/components/responses/ValidationError" }
+
+  # ------------------------------------------------------------------ Users
+  /api/v1/users:
+    get:
+      tags: [Users]
+      summary: List users (administrator only)
+      parameters:
+        - { name: role, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string } }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: comuna, in: query, schema: { type: string } }
+        - name: health_system
+          in: query
+          schema:
+            type: string
+            enum: [fonasa, isapre, capredena, dipreca, private, other]
+        - name: sex
+          in: query
+          schema:
+            type: string
+            enum: [female, male, other, prefer_not_to_say]
+        - name: living_situation
+          in: query
+          schema:
+            type: string
+            enum:
+              - alone
+              - with_partner
+              - with_children
+              - with_partner_and_children
+              - with_family
+              - with_caregiver
+              - other
+        - name: age_min
+          in: query
+          description: Minimum completed age in years, computed from birth_date.
+          schema: { type: integer, minimum: 0, maximum: 120 }
+        - name: age_max
+          in: query
+          description: Maximum completed age in years, computed from birth_date.
+          schema: { type: integer, minimum: 0, maximum: 120 }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Paginated users
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/users/me:
+    get:
+      tags: [Users]
+      summary: Get the caller's profile
+      responses:
+        "200":
+          description: Profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+    patch:
+      tags: [Users]
+      summary: Update the caller's profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [full_name]
+              properties:
+                full_name: { type: string }
+                phone: { type: string }
+                birth_date: { type: string, format: date }
+                comuna: { type: string }
+                health_system:
+                  type: string
+                  enum: [fonasa, isapre, capredena, dipreca, private, other]
+                sex:
+                  type: string
+                  enum: [female, male, other, prefer_not_to_say]
+                living_situation:
+                  type: string
+                  enum:
+                    - alone
+                    - with_partner
+                    - with_children
+                    - with_partner_and_children
+                    - with_family
+                    - with_caregiver
+                    - other
+      responses:
+        "200":
+          description: Updated profile
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/users/me/password:
+    post:
+      tags: [Users]
+      summary: Change the caller's password
+      description: Revokes every active session on success.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: { type: string }
+                new_password: { type: string, minLength: 8, maxLength: 72 }
+      responses:
+        "204": { description: Password changed }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+  /api/v1/users/me/enrollments:
+    get:
+      tags: [Activities]
+      summary: List the caller's activity enrollments
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Paginated enrollments
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Enrollment" }
+  /api/v1/users/me/skills:
+    get:
+      tags: [Opportunities]
+      summary: List the caller's skills
+      responses:
+        "200":
+          description: Skills
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Skill" }
+    post:
+      tags: [Opportunities]
+      summary: Add a skill to the caller's profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SkillInput" }
+      responses:
+        "201":
+          description: Created skill
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Skill" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/users/{id}:
+    get:
+      tags: [Users]
+      summary: Get a user (self or administrator)
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: User
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/users/{id}/status:
+    patch:
+      tags: [Users]
+      summary: Update a user's status (administrator only)
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, inactive, suspended] }
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/users/{id}/role:
+    patch:
+      tags: [Users]
+      summary: Update a user's role (administrator only)
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [mobile_user, institutional_client, org_collaborator, admin]
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/users/{id}/institutional-approval:
+    patch:
+      tags: [Users]
+      summary: Approve or revoke institutional portal access (administrator only)
+      description: |
+        Only applies to `institutional_client` accounts. The change takes effect on the
+        account's next request, without waiting for its access token to expire.
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [approved]
+              properties:
+                approved: { type: boolean }
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # --------------------------------------------------------------- Services
+  /api/v1/service-categories:
+    get:
+      tags: [Services]
+      summary: List service categories
+      responses:
+        "200":
+          description: Categories
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/ServiceCategory" }
+  /api/v1/services:
+    get:
+      tags: [Services]
+      summary: Search services
+      parameters:
+        - { name: category_id, in: query, schema: { type: string, format: uuid } }
+        - { name: type, in: query, schema: { type: string, enum: [establishment, resource] } }
+        - { name: status, in: query, schema: { type: string, enum: [active, inactive, draft] } }
+        - { name: comuna, in: query, schema: { type: string } }
+        - { name: region, in: query, schema: { type: string } }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: organization_id, in: query, schema: { type: string, format: uuid } }
+        - { name: lat, in: query, description: Latitude for proximity search, schema: { type: number } }
+        - { name: lng, in: query, description: Longitude for proximity search, schema: { type: number } }
+        - { name: radius_km, in: query, description: Radius in kilometres, schema: { type: number } }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Paginated services (ordered by distance when lat/lng/radius_km are provided)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Service" }
+    post:
+      tags: [Services]
+      summary: Create a service
+      description: Requires an administrator role or a write role in the target organization.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServiceInput" }
+      responses:
+        "201":
+          description: Created service
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Service" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/services/{id}:
+    get:
+      tags: [Services]
+      summary: Get a service
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Service
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Service" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Services]
+      summary: Update a service
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ServiceInput" }
+      responses:
+        "200":
+          description: Updated service
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Service" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Services]
+      summary: Delete a service
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/services/{id}/status:
+    patch:
+      tags: [Services]
+      summary: Activate or deactivate a service
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [active, inactive, draft] }
+      responses:
+        "200":
+          description: Updated service
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Service" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # -------------------------------------------------------------- Activities
+  /api/v1/activities:
+    get:
+      tags: [Activities]
+      summary: Search activities
+      parameters:
+        - { name: type, in: query, schema: { type: string, enum: [workshop, event, course, support_group] } }
+        - { name: status, in: query, schema: { type: string, enum: [draft, published, cancelled, finished] } }
+        - { name: modality, in: query, schema: { type: string, enum: [in_person, online, hybrid] } }
+        - { name: comuna, in: query, schema: { type: string } }
+        - { name: region, in: query, schema: { type: string } }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: organization_id, in: query, schema: { type: string, format: uuid } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Paginated activities
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Activity" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Activities]
+      summary: Create an activity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ActivityInput" }
+      responses:
+        "201":
+          description: Created activity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Activity" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/activities/{id}:
+    get:
+      tags: [Activities]
+      summary: Get an activity
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Activity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Activity" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Activities]
+      summary: Update an activity
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ActivityInput" }
+      responses:
+        "200":
+          description: Updated activity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Activity" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/activities/{id}/status:
+    patch:
+      tags: [Activities]
+      summary: Change an activity's status
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [draft, published, cancelled, finished] }
+      responses:
+        "200":
+          description: Updated activity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Activity" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/activities/{id}/enrollments:
+    get:
+      tags: [Activities]
+      summary: List an activity's enrollments (manager or administrator)
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Paginated enrollments
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Enrollment" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Activities]
+      summary: Enroll the caller in an activity
+      description: |
+        Capacity is enforced transactionally with a row lock on the activity.
+        When the activity is full the enrollment is created with status
+        `waitlist`. Enrolling twice returns 409. Only a `cancelled` enrollment
+        can be reactivated; an `attended` enrollment is kept as-is and also
+        returns 409.
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "201":
+          description: Enrollment result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enrollment: { $ref: "#/components/schemas/Enrollment" }
+                  waitlisted: { type: boolean }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v1/activities/{id}/enrollments/me:
+    delete:
+      tags: [Activities]
+      summary: Cancel the caller's enrollment
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "204": { description: Enrollment cancelled }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/activities/{id}/enrollments/{userId}:
+    patch:
+      tags: [Activities]
+      summary: Update an enrollment's status (manager or administrator)
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [enrolled, waitlist, cancelled, attended] }
+      responses:
+        "204": { description: Updated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ----------------------------------------------------------- Opportunities
+  /api/v1/skills/{id}:
+    put:
+      tags: [Opportunities]
+      summary: Update a skill
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SkillInput" }
+      responses:
+        "200":
+          description: Updated skill
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Skill" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      tags: [Opportunities]
+      summary: Delete a skill
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/offerings:
+    get:
+      tags: [Opportunities]
+      summary: List offerings (classes/services published by users)
+      parameters:
+        - { name: user_id, in: query, schema: { type: string, format: uuid } }
+        - { name: type, in: query, schema: { type: string, enum: [class, service] } }
+        - { name: status, in: query, schema: { type: string, enum: [draft, active, inactive] } }
+        - { name: modality, in: query, schema: { type: string, enum: [in_person, online, hybrid] } }
+        - { name: comuna, in: query, schema: { type: string } }
+        - { name: search, in: query, schema: { type: string } }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Paginated offerings
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Offering" }
+    post:
+      tags: [Opportunities]
+      summary: Publish an offering
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OfferingInput" }
+      responses:
+        "201":
+          description: Created offering
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Offering" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/offerings/{id}:
+    get:
+      tags: [Opportunities]
+      summary: Get an offering
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Offering
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Offering" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    put:
+      tags: [Opportunities]
+      summary: Update the caller's offering
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OfferingInput" }
+      responses:
+        "200":
+          description: Updated offering
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Offering" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/offerings/{id}/status:
+    patch:
+      tags: [Opportunities]
+      summary: Change an offering's status
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [draft, active, inactive] }
+      responses:
+        "204": { description: Updated }
+  /api/v1/opportunities:
+    get:
+      tags: [Opportunities]
+      summary: List economic opportunities
+      parameters:
+        - { name: type, in: query, schema: { type: string, enum: [job, gig, volunteer, economic] } }
+        - { name: status, in: query, schema: { type: string, enum: [draft, open, closed] } }
+        - { name: comuna, in: query, schema: { type: string } }
+        - { name: region, in: query, schema: { type: string } }
+        - { name: search, in: query, schema: { type: string } }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Paginated opportunities
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Opportunity" }
+    post:
+      tags: [Opportunities]
+      summary: Create an opportunity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OpportunityInput" }
+      responses:
+        "201":
+          description: Created opportunity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Opportunity" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/opportunities/{id}:
+    get:
+      tags: [Opportunities]
+      summary: Get an opportunity
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Opportunity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Opportunity" }
+    put:
+      tags: [Opportunities]
+      summary: Update an opportunity
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OpportunityInput" }
+      responses:
+        "200":
+          description: Updated opportunity
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Opportunity" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/opportunities/{id}/status:
+    patch:
+      tags: [Opportunities]
+      summary: Change an opportunity's status
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [draft, open, closed] }
+      responses:
+        "204": { description: Updated }
+  /api/v1/opportunities/{id}/applications:
+    get:
+      tags: [Opportunities]
+      summary: List applications (manager or administrator)
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Paginated applications
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Application" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Opportunities]
+      summary: Apply to an opportunity
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message: { type: string }
+      responses:
+        "201":
+          description: Application submitted
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Application" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v1/opportunities/{id}/applications/{appId}:
+    patch:
+      tags: [Opportunities]
+      summary: Accept or reject an application (manager or administrator)
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - { name: appId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [applied, accepted, rejected] }
+      responses:
+        "204": { description: Updated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # -------------------------------------------------------------- Assistance
+  /api/v1/assistance/contacts:
+    get:
+      tags: [Assistance]
+      summary: List the caller's trusted contacts
+      responses:
+        "200":
+          description: Contacts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/TrustedContact" }
+    post:
+      tags: [Assistance]
+      summary: Create a trusted contact
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TrustedContactInput" }
+      responses:
+        "201":
+          description: Created contact
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrustedContact" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+  /api/v1/assistance/contacts/{id}:
+    put:
+      tags: [Assistance]
+      summary: Update a trusted contact
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TrustedContactInput" }
+      responses:
+        "200":
+          description: Updated contact
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TrustedContact" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      tags: [Assistance]
+      summary: Delete a trusted contact
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "204": { description: Deleted }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/assistance/requests:
+    get:
+      tags: [Assistance]
+      summary: List assistance requests (own, or all for administrators)
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [pending, notified, resolved, cancelled] } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Paginated requests
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/AssistanceRequest" }
+    post:
+      tags: [Assistance]
+      summary: Create an assistance request
+      description: |
+        Notifies the caller's trusted contacts through the configured provider.
+        When no provider is configured, each attempt is recorded with status
+        `skipped` and the request is **not** marked as notified: the API never
+        reports a delivery that did not happen.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                type: { type: string, example: medical }
+                description: { type: string }
+                latitude: { type: number }
+                longitude: { type: number }
+                contact_id: { type: string, format: uuid }
+      responses:
+        "201":
+          description: Created request with notification attempts
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistanceRequest" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/assistance/requests/{id}:
+    get:
+      tags: [Assistance]
+      summary: Get an assistance request
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistanceRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/assistance/requests/{id}/status:
+    patch:
+      tags: [Assistance]
+      summary: Update an assistance request's status
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, enum: [pending, notified, resolved, cancelled] }
+      responses:
+        "200":
+          description: Updated request
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistanceRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  # ----------------------------------------------------------- Organizations
+  /api/v1/organizations:
+    get:
+      tags: [Organizations]
+      summary: List organizations (all for administrators, own memberships otherwise)
+      parameters:
+        - { name: type, in: query, schema: { type: string } }
+        - { name: search, in: query, schema: { type: string } }
+        - { name: active, in: query, schema: { type: boolean } }
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Paginated organizations
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Organization" }
+    post:
+      tags: [Organizations]
+      summary: Create an organization (institutional roles)
+      description: The creator becomes the organization owner.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrganizationInput" }
+      responses:
+        "201":
+          description: Created organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Organization" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/organizations/mine:
+    get:
+      tags: [Organizations]
+      summary: List the caller's organizations with their role
+      responses:
+        "200":
+          description: Memberships
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        organization: { $ref: "#/components/schemas/Organization" }
+                        role: { type: string, enum: [owner, admin, editor, viewer] }
+  /api/v1/organizations/{id}:
+    get:
+      tags: [Organizations]
+      summary: Get an organization
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Organization" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    put:
+      tags: [Organizations]
+      summary: Update an organization
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OrganizationInput" }
+      responses:
+        "200":
+          description: Updated organization
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Organization" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/organizations/{id}/members:
+    get:
+      tags: [Organizations]
+      summary: List organization members
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Members
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/OrganizationMember" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Organizations]
+      summary: Add a member by user id or email
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_id: { type: string, format: uuid }
+                email: { type: string, format: email }
+                role: { type: string, enum: [owner, admin, editor, viewer] }
+      responses:
+        "201":
+          description: Added member
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OrganizationMember" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/organizations/{id}/members/{userId}:
+    patch:
+      tags: [Organizations]
+      summary: Update a member's role
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role: { type: string, enum: [owner, admin, editor, viewer] }
+      responses:
+        "204": { description: Updated }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    delete:
+      tags: [Organizations]
+      summary: Remove a member
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+        - { name: userId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Removed }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  # -------------------------------------------------------------- Analytics
+  /api/v1/analytics/overview:
+    get:
+      tags: [Analytics]
+      summary: Aggregate indicators for the institutional dashboard
+      parameters:
+        - { name: organization_id, in: query, description: Restrict to one organization, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: Overview
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AnalyticsOverview" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/analytics/reports:
+    get:
+      tags: [Analytics]
+      summary: List available report identifiers
+      responses:
+        "200":
+          description: Reports
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { type: string }
+                  formats:
+                    type: array
+                    items: { type: string }
+  /api/v1/analytics/reports/{type}:
+    get:
+      tags: [Analytics]
+      summary: Export a dataset as CSV or preview it as JSON
+      description: |
+        Whitelisted dataset types: `services`, `activities`, `enrollments`,
+        `assistance`, `opportunities`, `territorial`. `format=json` returns a bounded
+        preview (first 200 rows) for on-screen display. `format=pdf` returns 501.
+      parameters:
+        - name: type
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [services, activities, enrollments, assistance, opportunities, territorial]
+        - { name: organization_id, in: query, schema: { type: string, format: uuid } }
+        - { name: format, in: query, schema: { type: string, enum: [csv, json, pdf], default: csv } }
+      responses:
+        "200":
+          description: CSV file, or a JSON preview when `format=json`
+          content:
+            text/csv:
+              schema: { type: string }
+            application/json:
+              schema: { $ref: "#/components/schemas/ReportPreview" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  # -------------------------------------------------------------- Preferences
+  /api/v1/users/me/preferences:
+    get:
+      tags: [Users]
+      summary: Get the caller's preferences
+      description: |
+        Returns the caller's stored preferences. When nothing has been stored
+        yet, empty defaults are returned and nothing is persisted.
+      responses:
+        "200":
+          description: Preferences
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserPreferences" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    put:
+      tags: [Users]
+      summary: Replace the caller's preferences
+      description: |
+        Interests are trimmed and de-duplicated (case-insensitively). At most 30
+        interests of up to 60 characters each are accepted.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UserPreferencesInput" }
+      responses:
+        "200":
+          description: Stored preferences
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UserPreferences" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/users/me/email:
+    post:
+      tags: [Users]
+      summary: Change the caller's email
+      description: |
+        Requires the current password. The email is normalized to lower case and
+        must not already belong to another account (409 otherwise).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ChangeEmailInput" }
+      responses:
+        "200":
+          description: Updated user
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /api/v1/users/me/applications:
+    get:
+      tags: [Opportunities]
+      summary: List the caller's opportunity applications
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Applications with the opportunity summary expanded
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Application" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/users/me/reminders:
+    get:
+      tags: [Activities]
+      summary: List the caller's activity reminders
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Reminders
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/ActivityReminder" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --------------------------------------------------------------- Reminders
+  /api/v1/activities/{id}/reminders:
+    post:
+      tags: [Activities]
+      summary: Set a reminder for an activity
+      description: |
+        Creates or revives the caller's reminder. Without `remind_at` the
+        reminder defaults to 24 hours before the activity starts. Delivery
+        depends on a scheduler and a configured notification provider; without
+        them the reminder is stored but nothing is sent.
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReminderInput" }
+      responses:
+        "201":
+          description: Reminder created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ActivityReminder" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/activities/{id}/reminders/me:
+    delete:
+      tags: [Activities]
+      summary: Cancel the caller's reminder for an activity
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "204": { description: Reminder cancelled }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ---------------------------------------------------------------- Reports
+  /api/v1/opportunities/{id}/reports:
+    post:
+      tags: [Opportunities]
+      summary: Report a suspicious opportunity
+      description: A user may report an opportunity only once (409 on retry).
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ReportInput" }
+      responses:
+        "201":
+          description: Report recorded
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OpportunityReport" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  # ---------------------------------------------------------------- Devices
+  /api/v1/devices:
+    get:
+      tags: [Notifications]
+      summary: List the caller's active push devices
+      responses:
+        "200":
+          description: Devices
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [Notifications]
+      summary: Register (or refresh) a push device
+      description: |
+        Tokens are unique. Re-registering the same token revives it and moves it
+        to the current user.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceInput" }
+      responses:
+        "201":
+          description: Device registered
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/devices/{id}:
+    delete:
+      tags: [Notifications]
+      summary: Revoke a push device
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "204": { description: Device revoked }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # ------------------------------------------------------------ Notifications
+  /api/v1/notifications:
+    get:
+      tags: [Notifications]
+      summary: List the caller's in-app notifications
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PerPage"
+      responses:
+        "200":
+          description: Notifications
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/PageMeta"
+                  - type: object
+                    properties:
+                      items:
+                        type: array
+                        items: { $ref: "#/components/schemas/Notification" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/notifications/unread-count:
+    get:
+      tags: [Notifications]
+      summary: Count the caller's unread notifications
+      responses:
+        "200":
+          description: Unread count
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unread: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/notifications/read-all:
+    post:
+      tags: [Notifications]
+      summary: Mark every unread notification as read
+      responses:
+        "200":
+          description: Number of notifications updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updated: { type: integer }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/notifications/{id}/read:
+    post:
+      tags: [Notifications]
+      summary: Mark one notification as read
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "204": { description: Notification marked as read }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  # -------------------------------------------------------------- Assistant
+  /api/v1/assistant/topics:
+    get:
+      tags: [Assistant]
+      summary: List the curated help topics
+      description: |
+        The assistant is backed by a curated, non-AI knowledge base. It never
+        replaces medical or emergency professionals.
+      responses:
+        "200":
+          description: Help topics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/AssistantTopic" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/assistant/answer:
+    get:
+      tags: [Assistant]
+      summary: Ask the assistant a question
+      description: |
+        Answers come from the curated knowledge base (`source: knowledge_base`,
+        `ai: false`) or, when configured, an external provider
+        (`source: provider`, `ai: true`). Unmatched questions return an honest
+        fallback rather than an invented answer.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, maxLength: 500 }
+      responses:
+        "200":
+          description: Answer
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AssistantAnswer" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  # --------------------------------------------------------------------- Geo
+  /api/v1/geo/search:
+    get:
+      tags: [Geo]
+      summary: Forward geocoding (place name to coordinates)
+      description: |
+        Requires `GEOCODE_PROVIDER=nominatim`. Without a provider the endpoint
+        returns 501 instead of inventing coordinates.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, maxLength: 200 }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 20, default: 5 } }
+      responses:
+        "200":
+          description: Matches
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/GeoResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  /api/v1/geo/reverse:
+    get:
+      tags: [Geo]
+      summary: Reverse geocoding (coordinates to a place label)
+      description: Requires `GEOCODE_PROVIDER=nominatim`; 501 otherwise.
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number, minimum: -90, maximum: 90 } }
+        - { name: lng, in: query, required: true, schema: { type: number, minimum: -180, maximum: 180 } }
+      responses:
+        "200":
+          description: Place label
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GeoResult" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "501": { $ref: "#/components/responses/NotImplemented" }
+
+  # ---------------------------------------------------------------- Payments
+  /api/v1/payments/config:
+    get:
+      tags: [Payments]
+      summary: Report the online payments capability
+      description: |
+        No payment provider is enabled by default, so the platform honestly
+        reports payments as unavailable and never fakes a checkout.
+      responses:
+        "200":
+          description: Payments capability
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PaymentsConfig" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/payments/intents:
+    post:
+      tags: [Payments]
+      summary: Create a payment intent
+      description: Returns 501 while no payment provider is configured.
+      responses:
+        "501": { $ref: "#/components/responses/NotImplemented" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    Page:
+      name: page
+      in: query
+      schema: { type: integer, minimum: 1, default: 1 }
+    PerPage:
+      name: per_page
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+  responses:
+    ValidationError:
+      description: The request payload is invalid
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Unauthorized:
+      description: Authentication is missing or invalid
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Forbidden:
+      description: The caller is authenticated but not allowed to perform this action
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    NotFound:
+      description: The resource does not exist
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Conflict:
+      description: The operation conflicts with the current state
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    NotImplemented:
+      description: The requested capability is not implemented yet
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string, example: validation_error }
+            message: { type: string }
+            fields:
+              type: array
+              items:
+                type: object
+                properties:
+                  field: { type: string }
+                  message: { type: string }
+    PageMeta:
+      type: object
+      properties:
+        pagination:
+          type: object
+          properties:
+            page: { type: integer }
+            per_page: { type: integer }
+            total: { type: integer }
+            total_pages: { type: integer }
+    User:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email }
+        full_name: { type: string }
+        phone: { type: string }
+        birth_date: { type: string, format: date, nullable: true }
+        comuna: { type: string }
+        health_system:
+          type: string
+          enum: [fonasa, isapre, capredena, dipreca, private, other]
+        sex:
+          type: string
+          enum: [female, male, other, prefer_not_to_say]
+        living_situation:
+          type: string
+          enum:
+            - alone
+            - with_partner
+            - with_children
+            - with_partner_and_children
+            - with_family
+            - with_caregiver
+            - other
+        role: { type: string, enum: [mobile_user, institutional_client, org_collaborator, admin] }
+        status: { type: string, enum: [active, inactive, suspended] }
+        institutional_approved:
+          type: boolean
+          description: |
+            Whether an `institutional_client` may use the institutional portal.
+            Always true for the other roles.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        last_login_at: { type: string, format: date-time, nullable: true }
+    Session:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        user_agent: { type: string }
+        ip_address: { type: string }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        current: { type: boolean }
+    TokenPair:
+      type: object
+      properties:
+        access_token: { type: string }
+        refresh_token: { type: string }
+        token_type: { type: string, example: Bearer }
+        expires_in: { type: integer, description: Access token lifetime in seconds }
+        session_id: { type: string, format: uuid }
+        user: { $ref: "#/components/schemas/User" }
+    ServiceCategory:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        slug: { type: string }
+        description: { type: string }
+    ScheduleEntry:
+      type: object
+      properties:
+        day_of_week: { type: integer, minimum: 0, maximum: 6, description: 0=Sunday }
+        opens_at: { type: string, example: "09:00" }
+        closes_at: { type: string, example: "13:00" }
+    Service:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid, nullable: true }
+        organization_name: { type: string, description: Organization that provides the service }
+        category_id: { type: string, format: uuid, nullable: true }
+        category: { $ref: "#/components/schemas/ServiceCategory" }
+        name: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [establishment, resource] }
+        status: { type: string, enum: [active, inactive, draft] }
+        address: { type: string }
+        comuna: { type: string }
+        region: { type: string }
+        latitude: { type: number, nullable: true }
+        longitude: { type: number, nullable: true }
+        phone: { type: string }
+        email: { type: string }
+        website: { type: string }
+        schedule:
+          type: array
+          items: { $ref: "#/components/schemas/ScheduleEntry" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ServiceInput:
+      type: object
+      required: [name]
+      properties:
+        organization_id: { type: string, format: uuid, nullable: true }
+        category_id: { type: string, format: uuid, nullable: true }
+        name: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [establishment, resource] }
+        status: { type: string, enum: [active, inactive, draft] }
+        address: { type: string }
+        comuna: { type: string }
+        region: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        phone: { type: string }
+        email: { type: string }
+        website: { type: string }
+        schedule:
+          type: array
+          items: { $ref: "#/components/schemas/ScheduleEntry" }
+    Activity:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid, nullable: true }
+        service_id: { type: string, format: uuid, nullable: true }
+        category_id: { type: string, format: uuid, nullable: true }
+        title: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [workshop, event, course, support_group] }
+        modality: { type: string, enum: [in_person, online, hybrid] }
+        status: { type: string, enum: [draft, published, cancelled, finished] }
+        location: { type: string }
+        comuna: { type: string }
+        region: { type: string }
+        latitude: { type: number, nullable: true }
+        longitude: { type: number, nullable: true }
+        start_at: { type: string, format: date-time }
+        end_at: { type: string, format: date-time, nullable: true }
+        capacity: { type: integer }
+        enrolled_count: { type: integer }
+        price: { type: number }
+        currency: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ActivityInput:
+      type: object
+      required: [title, start_at]
+      properties:
+        organization_id: { type: string, format: uuid, nullable: true }
+        service_id: { type: string, format: uuid, nullable: true }
+        category_id: { type: string, format: uuid, nullable: true }
+        title: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [workshop, event, course, support_group] }
+        modality: { type: string, enum: [in_person, online, hybrid] }
+        status: { type: string, enum: [draft, published, cancelled, finished] }
+        location: { type: string }
+        comuna: { type: string }
+        region: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        start_at: { type: string, format: date-time }
+        end_at: { type: string, format: date-time }
+        capacity: { type: integer, minimum: 0 }
+        price: { type: number, minimum: 0 }
+        currency: { type: string }
+    Enrollment:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        activity_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        status: { type: string, enum: [enrolled, waitlist, cancelled, attended] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        activity_title: { type: string }
+        user_email: { type: string }
+        user_full_name: { type: string }
+    Skill:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        level: { type: string, enum: [beginner, intermediate, advanced, expert] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    SkillInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        description: { type: string }
+        level: { type: string, enum: [beginner, intermediate, advanced, expert] }
+    Offering:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        skill_id: { type: string, format: uuid, nullable: true }
+        title: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [class, service] }
+        status: { type: string, enum: [draft, active, inactive] }
+        modality: { type: string, enum: [in_person, online, hybrid] }
+        price: { type: number }
+        currency: { type: string }
+        comuna: { type: string }
+        region: { type: string }
+    OfferingInput:
+      type: object
+      required: [title]
+      properties:
+        skill_id: { type: string, format: uuid, nullable: true }
+        title: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [class, service] }
+        status: { type: string, enum: [draft, active, inactive] }
+        modality: { type: string, enum: [in_person, online, hybrid] }
+        price: { type: number, minimum: 0 }
+        currency: { type: string }
+        comuna: { type: string }
+        region: { type: string }
+    Opportunity:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid, nullable: true }
+        title: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [job, gig, volunteer, economic] }
+        status: { type: string, enum: [draft, open, closed] }
+        comuna: { type: string }
+        region: { type: string }
+        salary_min: { type: number, nullable: true }
+        salary_max: { type: number, nullable: true }
+        currency: { type: string }
+        contact_email: { type: string }
+        expires_at: { type: string, format: date-time, nullable: true }
+    OpportunityInput:
+      type: object
+      required: [title]
+      properties:
+        organization_id: { type: string, format: uuid, nullable: true }
+        title: { type: string }
+        description: { type: string }
+        type: { type: string, enum: [job, gig, volunteer, economic] }
+        status: { type: string, enum: [draft, open, closed] }
+        comuna: { type: string }
+        region: { type: string }
+        salary_min: { type: number }
+        salary_max: { type: number }
+        currency: { type: string }
+        contact_email: { type: string, format: email }
+        expires_at: { type: string, format: date-time }
+    Application:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        opportunity_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        message: { type: string }
+        status: { type: string, enum: [applied, accepted, rejected] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        opportunity_title: { type: string, description: Populated when listing the caller's own applications }
+        opportunity_status: { type: string, enum: [draft, open, closed] }
+        opportunity_type: { type: string, enum: [job, gig, volunteer, economic] }
+        comuna: { type: string }
+        region: { type: string }
+    TrustedContact:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        name: { type: string }
+        relationship: { type: string }
+        phone: { type: string }
+        email: { type: string }
+        priority: { type: integer }
+    TrustedContactInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        relationship: { type: string }
+        phone: { type: string }
+        email: { type: string, format: email }
+        priority: { type: integer, minimum: 1, maximum: 10 }
+    AssistanceRequest:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        type: { type: string }
+        description: { type: string }
+        latitude: { type: number, nullable: true }
+        longitude: { type: number, nullable: true }
+        status: { type: string, enum: [pending, notified, resolved, cancelled] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        resolved_at: { type: string, format: date-time, nullable: true }
+        notifications:
+          type: array
+          items: { $ref: "#/components/schemas/AssistanceNotification" }
+    AssistanceNotification:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        assistance_request_id: { type: string, format: uuid }
+        contact_id: { type: string, format: uuid, nullable: true }
+        channel: { type: string, enum: [sms, email] }
+        recipient: { type: string }
+        provider: { type: string }
+        status: { type: string, enum: [pending, sent, failed, skipped] }
+        error: { type: string }
+        sent_at: { type: string, format: date-time, nullable: true }
+    Organization:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        type: { type: string, enum: [health, community, ngo, employer, government, educational, other] }
+        legal_id: { type: string }
+        description: { type: string }
+        email: { type: string }
+        phone: { type: string }
+        address: { type: string }
+        comuna: { type: string }
+        region: { type: string }
+        latitude: { type: number, nullable: true }
+        longitude: { type: number, nullable: true }
+        active: { type: boolean }
+    OrganizationInput:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [health, community, ngo, employer, government, educational, other] }
+        legal_id: { type: string }
+        description: { type: string }
+        email: { type: string, format: email }
+        phone: { type: string }
+        address: { type: string }
+        comuna: { type: string }
+        region: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        active: { type: boolean }
+    OrganizationMember:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        organization_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        role: { type: string, enum: [owner, admin, editor, viewer] }
+        user_email: { type: string }
+        user_full_name: { type: string }
+        created_at: { type: string, format: date-time }
+    AnalyticsOverview:
+      type: object
+      properties:
+        services_total: { type: integer }
+        services_active: { type: integer }
+        activities_total: { type: integer }
+        activities_published: { type: integer }
+        activities_upcoming: { type: integer }
+        enrollments_total: { type: integer }
+        enrollments_active: { type: integer }
+        users_total: { type: integer }
+        users_mobile: { type: integer }
+        organizations_total: { type: integer }
+        opportunities_open: { type: integer }
+        assistance_total: { type: integer }
+        assistance_pending: { type: integer }
+        average_occupancy: { type: number, description: Mean enrolled/capacity ratio across activities with capacity }
+        services_by_category:
+          type: array
+          items: { $ref: "#/components/schemas/CountByLabel" }
+        activities_by_type:
+          type: array
+          items: { $ref: "#/components/schemas/CountByLabel" }
+        territorial_distribution:
+          type: array
+          items:
+            type: object
+            properties:
+              comuna: { type: string }
+              region: { type: string }
+              count: { type: integer }
+    CountByLabel:
+      type: object
+      properties:
+        label: { type: string }
+        count: { type: integer }
+    ReportPreview:
+      type: object
+      description: Bounded JSON preview of a report, used by the on-screen table.
+      properties:
+        type: { type: string }
+        headers:
+          type: array
+          items: { type: string }
+        rows:
+          type: array
+          items:
+            type: array
+            items: { type: string }
+        total: { type: integer, description: Total rows in the full dataset }
+        truncated: { type: boolean, description: True when only the first 200 rows are included }
+    AccessibilityPreferences:
+      type: object
+      description: Display/accessibility toggles that follow the user across devices.
+      properties:
+        large_text: { type: boolean }
+        high_contrast: { type: boolean }
+        reduce_motion: { type: boolean }
+        screen_reader: { type: boolean }
+    NotificationPreferences:
+      type: object
+      description: Notification opt-ins stored for the user.
+      properties:
+        activity_reminders: { type: boolean }
+        assistance: { type: boolean }
+        opportunities: { type: boolean }
+        courses: { type: boolean }
+    UserPreferences:
+      type: object
+      properties:
+        interests:
+          type: array
+          items: { type: string }
+        accessibility: { $ref: "#/components/schemas/AccessibilityPreferences" }
+        notifications: { $ref: "#/components/schemas/NotificationPreferences" }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    UserPreferencesInput:
+      type: object
+      properties:
+        interests:
+          type: array
+          maxItems: 30
+          items: { type: string, maxLength: 60 }
+        accessibility: { $ref: "#/components/schemas/AccessibilityPreferences" }
+        notifications: { $ref: "#/components/schemas/NotificationPreferences" }
+    ChangeEmailInput:
+      type: object
+      required: [new_email, password]
+      properties:
+        new_email: { type: string, format: email }
+        password: { type: string, description: The caller's current password }
+    ActivityReminder:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        activity_id: { type: string, format: uuid }
+        remind_at: { type: string, format: date-time }
+        status: { type: string, enum: [pending, cancelled, sent, skipped] }
+        activity_title: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ReminderInput:
+      type: object
+      properties:
+        remind_at: { type: string, format: date-time, description: Defaults to 24 hours before the activity starts }
+    OpportunityReport:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        opportunity_id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        reason: { type: string }
+        details: { type: string }
+        status: { type: string, enum: [open, reviewing, dismissed, actioned] }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    ReportInput:
+      type: object
+      required: [reason]
+      properties:
+        reason: { type: string, maxLength: 120 }
+        details: { type: string, maxLength: 2000 }
+    Device:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        platform: { type: string, enum: [ios, android, web] }
+        token: { type: string }
+        device_name: { type: string }
+        app_version: { type: string }
+        last_seen_at: { type: string, format: date-time }
+        revoked_at: { type: string, format: date-time, nullable: true }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    DeviceInput:
+      type: object
+      required: [token]
+      properties:
+        platform: { type: string, enum: [ios, android, web], default: android }
+        token: { type: string, maxLength: 512 }
+        device_name: { type: string, maxLength: 120 }
+        app_version: { type: string, maxLength: 40 }
+    Notification:
+      type: object
+      description: |
+        In-app notification. `push_status` records the honest push delivery
+        attempt: without a configured provider nothing is sent and the attempt
+        is `skipped`.
+      properties:
+        id: { type: string, format: uuid }
+        user_id: { type: string, format: uuid }
+        kind: { type: string, example: application_status }
+        title: { type: string }
+        body: { type: string }
+        data: { type: object, additionalProperties: true }
+        read_at: { type: string, format: date-time, nullable: true }
+        push_status: { type: string, enum: [pending, sent, failed, skipped] }
+        push_provider: { type: string }
+        push_error: { type: string }
+        created_at: { type: string, format: date-time }
+    AssistantTopic:
+      type: object
+      properties:
+        slug: { type: string }
+        title: { type: string }
+        keywords:
+          type: array
+          items: { type: string }
+        answer: { type: string }
+        related:
+          type: array
+          items: { type: string }
+    AssistantAnswer:
+      type: object
+      properties:
+        question: { type: string }
+        answer: { type: string }
+        topic: { type: string }
+        source: { type: string, enum: [knowledge_base, provider] }
+        ai: { type: boolean, description: True only when an external AI provider produced the answer }
+        related:
+          type: array
+          items: { $ref: "#/components/schemas/AssistantTopic" }
+    GeoResult:
+      type: object
+      properties:
+        label: { type: string }
+        latitude: { type: number }
+        longitude: { type: number }
+        type: { type: string }
+        country: { type: string }
+        region: { type: string }
+        comuna: { type: string }
+    PaymentsConfig:
+      type: object
+      properties:
+        provider: { type: string, example: none }
+        available: { type: boolean }
+        message: { type: string }

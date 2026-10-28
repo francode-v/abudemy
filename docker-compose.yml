@@ -1,0 +1,54 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: abudemy-db
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-abudemy}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-abudemy}
+      POSTGRES_DB: ${POSTGRES_DB:-abudemy}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - abudemy-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-abudemy} -d ${POSTGRES_DB:-abudemy}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: abudemy-api
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: development
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: postgres://${POSTGRES_USER:-abudemy}:${POSTGRES_PASSWORD:-abudemy}@db:5432/${POSTGRES_DB:-abudemy}?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-dev-only-secret-please-change-me-0123456789}
+      JWT_ISSUER: abudemy
+      JWT_ACCESS_TTL: 15m
+      JWT_REFRESH_TTL: 720h
+      BCRYPT_COST: "12"
+      LOG_LEVEL: info
+      NOTIFY_PROVIDER: ${NOTIFY_PROVIDER:-none}
+      NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
+      NOTIFY_WEBHOOK_TOKEN: ${NOTIFY_WEBHOOK_TOKEN:-}
+      ASSISTANT_PROVIDER: ${ASSISTANT_PROVIDER:-none}
+      ASSISTANT_WEBHOOK_URL: ${ASSISTANT_WEBHOOK_URL:-}
+      ASSISTANT_WEBHOOK_TOKEN: ${ASSISTANT_WEBHOOK_TOKEN:-}
+      GEOCODE_PROVIDER: ${GEOCODE_PROVIDER:-none}
+      GEOCODE_BASE_URL: ${GEOCODE_BASE_URL:-}
+      GEOCODE_USER_AGENT: ${GEOCODE_USER_AGENT:-}
+      PAYMENTS_PROVIDER: ${PAYMENTS_PROVIDER:-none}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-*}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
+    ports:
+      - "${API_PORT:-8080}:8080"
+
+volumes:
+  abudemy-db-data:
